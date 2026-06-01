@@ -61,7 +61,18 @@ GEMINI_API_KEY=...          # or GOOGLE_API_KEY — used by the configurator & c
 - `GEMINI_API_KEY` / `GOOGLE_API_KEY` — required to run the configurator (`pre_injection/configure.py`) and the chat agent (`RAG_graph.py`), which call Gemini.
 - `ANTHROPIC_API_KEY` — for LLM-assisted extraction steps.
 
-The embedding model (`microsoft/harrier-oss-v1-0.6b`, ~1.2 GB) and reranker (`jinaai/jina-reranker-v3`) are downloaded from Hugging Face on first use.
+The embedding model and reranker (`jinaai/jina-reranker-v3`) are downloaded from Hugging Face on first use.
+
+The embedding model is chosen by a **device-aware profile** (the `EmbeddingProfile` entries in `EMBEDDING_PROFILES`, in `rag.py`), resolved automatically from the detected device so the same code runs on both machines:
+
+| Device | Profile | Model | Chunk tokens | Model window | Notes |
+| --- | --- | --- | --- | --- | --- |
+| MPS / CUDA (Apple MacBook) | `gpu` | `microsoft/harrier-oss-v1-0.6b` (~1.2 GB) | 2048 | 8192 | High quality; fast on GPU/MPS, painfully slow on CPU |
+| CPU (Windows PC) | `cpu` | `Alibaba-NLP/gte-modernbert-base` (~600 MB) | 512 | 8192 | ~4× smaller + smaller chunks → minutes, not hours; long window so nothing is truncated |
+
+`max_chunk_tokens` is counted in cl100k tokens; the model window is the model's own tokens (dense legal text retokenizes to ~1.3–1.8× more), so chunk budgets stay well under the window. `ingest()` also runs a live check and warns if any chunk would be truncated.
+
+Each profile bundles the model, its query prompt, the chunk size, the batch size, and the window limit — these must stay consistent, since vectors from different models aren't comparable. Override with `CLOIndentureRAG(embedding_profile="gpu")` or per-field args (`embedding_model_name=`, `max_chunk_tokens=`, …). Because the vector dimension differs per model, **each machine keeps its own `chroma_db`** (it's gitignored); re-ingest after switching profiles.
 
 ## Usage
 
@@ -84,6 +95,12 @@ rag.ingest(
     doc_id="my_deal",           # also used to find configs/my_deal.yaml
     overwrite=False,
 )
+```
+
+Or ingest the local indenture (`documents/CLO 29 - Indenture.pdf`) with the auto-profile run — picks the `cpu` profile on a Windows PC, the `gpu` profile on the MacBook, no edits needed:
+
+```bash
+python RAG/ingest_local.py
 ```
 
 Or use the step scripts to ingest the sample corpus end to end:

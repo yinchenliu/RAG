@@ -41,5 +41,8 @@ htmlcov/
 .idea/
 *.swp
 
+# Claude Code local runtime state (locks, local settings)
+.claude/
+
 # Jupyter
 .ipynb_checkpoints/

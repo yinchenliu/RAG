@@ -297,7 +297,7 @@ def _parse_via_linewalk(doc: fitz.Document, config: ParsedConfig) -> list[Sectio
     pending_section_page: int | None = None
 
     sched_re = body_cfg.schedule_cutoff_re
-    page_num_re = config.page_numbering.printed_page_re #QTC: what's this, the re for page number at the bottom of a page?
+    page_num_re = config.page_numbering.printed_page_re
     skip_res = body_cfg.line_skip_res
 
     for page_idx in range(start_page, len(doc)):

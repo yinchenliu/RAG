@@ -45,7 +45,7 @@ class TocConfig(BaseModel):
 
     @field_validator("heading_pattern")
     @classmethod
-    def _v_heading(cls, v: str) -> str: #QTC: not faimilar with BaseModel from Pydantic, seems that it's going to use the compiled re pattern to validate headering/chapter pattern? how?
+    def _v_heading(cls, v: str) -> str:
         return _validate_regex(v)
 
     @field_validator("chapter_pattern")
