@@ -56,10 +56,15 @@ class CLOIndentureRAG:
         if self._embedder is None:
             from sentence_transformers import SentenceTransformer # QTC: what does sentence_transofrmers lib do? seems that this library can help us create embedding/reranker model object?
 
+            device = self._resolve_device()
+            # On CPU, half-precision (bf16/fp16) matmuls are emulated and run
+            # ~20x slower than float32, which uses optimized oneDNN/MKL kernels.
+            # GPU/MPS keep "auto" since their native half precision is fast.
+            dtype = "auto" if device in ("cuda", "mps") else "float32"
             self._embedder = SentenceTransformer(
                 self.embedding_model_name,
-                device=self._resolve_device(),
-                model_kwargs={"dtype": "auto"},
+                device=device,
+                model_kwargs={"dtype": dtype},
             )
         return self._embedder
 
