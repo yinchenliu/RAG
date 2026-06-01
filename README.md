@@ -2,7 +2,7 @@
 
 A retrieval-augmented-generation pipeline for **CLO indentures, offering circulars, and credit agreements** — long, densely-structured legal PDFs. It parses a PDF into its Article/Section hierarchy, chunks it (with special handling for the ~90-page definitions block), embeds the chunks into a persistent [ChromaDB](https://www.trychroma.com/) collection, and exposes retrieval through a LangGraph chat agent.
 
-The parser and chunker are **document-agnostic engines**: all the document-specific patterns (TOC format, section-header regexes, definition delimiters) live in external YAML configs. An agentic loop generates a new config for each PDF, so onboarding a new document does not require code changes.
+The parser and chunker are **document-independent engines**: all the document-specific patterns (TOC format, section-header regexes, definition delimiters) live in external YAML configs. An agentic loop generates a new config for each PDF, so onboarding a new document does not require code changes.
 
 ## Pipeline at a glance
 
