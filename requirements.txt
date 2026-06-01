@@ -1,0 +1,14 @@
+pymupdf>=1.24
+chromadb>=0.5
+sentence-transformers>=3.0
+transformers>=4.44
+torch>=2.2
+tiktoken>=0.7
+langchain-text-splitters>=0.3
+pyyaml>=6.0
+pydantic>=2.6
+# Only required to run RAG.configure (the agentic config generator);
+# the parse/chunk/ingest path doesn't need these.
+langgraph>=0.2
+langchain-google-genai>=2.0
+google-generativeai>=0.8

@@ -1,0 +1,66 @@
+# Default parsing + chunking config for legal financial PDFs.
+#
+# Per-document configs (configs/<doc_id>.yaml) `extends: _defaults` and
+# override only what differs. The shape mirrors RAG.config.ParsedConfig.
+#
+# YAML single-quoted strings are used for regexes so backslashes are literal.
+# Inline flags (?i), (?m) keep us from needing a separate "flags" field.
+
+schema_version: 1
+
+toc:
+  # TOC heading on its own line. Case-insensitive.
+  heading_pattern: '(?i)\b(TABLE\s+OF\s+CONTENTS|CONTENTS)\b'
+  # Per-entry patterns, tried in order. First matches `Section X.Y Title ... page`
+  # with dot leaders or wide-space columns; second is the fallback for entries
+  # that wrap across lines.
+  entry_patterns:
+    - '^\s*(?:Section\s+)?(\d+\.\d+)\.?\s+(.+?)\s*(?:\.{2,}|\s{2,})\s*(\d+)\s*$'
+    - '^\s*(?:Section\s+)?(\d+\.\d+)\.?\s+(.+?)\s+(\d+)\s*$'
+  chapter_pattern: '(?i)^\s*(?:CHAPTER|ARTICLE|PART)\s+([IVXLC]+|\d+)\s+(.+?)\s*(?:\.{2,}|\s{2,})\s*(\d+)\s*$'
+  search_pages: 20
+  blank_page_streak_stop: 2
+  min_sections_to_accept: 5
+
+body:
+  # Single-line "Section X.Y Title" (no trailing period, allowed chars in title).
+  section_header_pattern: '^\s*(?:Section\s+)?(\d+\.\d+)\.?\s+([A-Z][A-Za-z0-9 ,;:&\-]+?)\s*$'
+  # "Section X.Y" alone on a line; title sits on the next line.
+  section_id_only_pattern: '^\s*Section\s+(\d+\.\d+)\.?\s*$'
+  chapter_pattern: '(?i)^\s*(?:CHAPTER|ARTICLE|PART)\s+([IVXLC]+|\d+)\b'
+  chapter_allcaps_pattern: '^\s*(\d+)\.\s+([A-Z][A-Z ]{3,})\s*$'
+  # Terminate the body at the first EXHIBIT/SCHEDULE/APPENDIX/ANNEX heading so
+  # trailing schedules are not absorbed into the last section.
+  schedule_cutoff_pattern: '(?m)^\s*(EXHIBIT|SCHEDULE|APPENDIX|ANNEX)\s+[A-Z0-9\-]+\s*$'
+  # Anchor strings the linewalk fallback uses to skip front matter. Empty by
+  # default; per-doc configs (e.g. credit agreements) can override.
+  body_start_markers: []
+  # Per-line skip patterns (running footers, etc.) for the linewalk fallback.
+  line_skip_patterns: []
+  page_skip_after_toc: 10
+
+page_numbering:
+  # Standalone printed page number on its own line.
+  printed_page_pattern: '^\s*(\d{1,4})\s*$'
+  search_first_n_lines: 3
+  search_last_n_lines: 3
+
+header_footer_strip:
+  enable: true
+  min_span_pages: 4
+  min_line_length: 3
+  max_line_length: 120
+  min_repetition_fraction: 0.5
+
+definitions:
+  # Section ids and title prefixes that flag the definitions section.
+  section_id_hints: ['1.1', '1.01']
+  title_prefix_hints: ['defin']
+  # CLO-indenture defined-term format:
+  #     "Account": ...
+  #     "Act" and "Act of Holders": ...
+  # One or more quoted names joined by and/or, then a colon. Anchored to start
+  # of line so inline quoted phrases inside a definition body don't split.
+  # Character class allows both straight " and curly “/” (PDFs vary).
+  term_split_pattern: '(?m)(?=^\s*(["“][^"”\n]+["”](?:\s+(?:and|or)\s+["“][^"”\n]+["”])*)\s*:)'
+  term_head_pattern: '^\s*(["“][^"”\n]+["”](?:\s+(?:and|or)\s+["“][^"”\n]+["”])*)\s*:'
