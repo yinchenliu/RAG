@@ -77,7 +77,8 @@ def _chunk_one_section(
 
     if is_definitions:
         term_chunks = _split_definitions(
-            section, doc_id, definitions_intro_tokens, config
+            section, doc_id, definitions_intro_tokens, config,
+            max_tokens=max_tokens, chunk_overlap_tokens=chunk_overlap_tokens,
         )
         if len(term_chunks) >= 5:
             return term_chunks
@@ -97,7 +98,8 @@ def _is_definitions_section(section: Section, config: ParsedConfig) -> bool:
 
 
 def _split_definitions(
-    section: Section, doc_id: str, intro_tokens: int, config: ParsedConfig
+    section: Section, doc_id: str, intro_tokens: int, config: ParsedConfig,
+    max_tokens: int = 10000, chunk_overlap_tokens: int = 200,
 ) -> list[Chunk]:
     text = section["text"]
     split_re = config.definitions.term_split_re
@@ -129,7 +131,21 @@ def _split_definitions(
         )
 
     for idx, (term, body) in enumerate(term_blocks):
-        chunks.append(_make_chunk(section, body, "defined_term", term, idx, doc_id))
+        if count_tokens(body) <= max_tokens:
+            chunks.append(_make_chunk(section, body, "defined_term", term, idx, doc_id))
+        else:
+            # Sub-split oversized term definitions to stay within max_tokens
+            splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+                encoding_name="cl100k_base",
+                chunk_size=max_tokens,
+                chunk_overlap=chunk_overlap_tokens,
+                separators=["\n\n", "\n", "; ", ". ", ", ", " ", ""],
+            )
+            pieces = splitter.split_text(body)
+            for sub_idx, piece in enumerate(pieces):
+                chunks.append(
+                    _make_chunk(section, piece, "defined_term", f"{term}|{sub_idx}", idx, doc_id)
+                )
 
     return chunks
 
@@ -151,7 +167,7 @@ def _recursive_subsplit(
         encoding_name="cl100k_base",
         chunk_size=max_tokens,
         chunk_overlap=chunk_overlap_tokens,
-        separators=["\n\n"],
+        separators=["\n\n", "\n", "; ", ". ", ", ", " ", ""],
     )
     pieces = splitter.split_text(section["text"])
     return [

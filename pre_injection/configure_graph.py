@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import re
 import statistics
 from collections import Counter
 from pathlib import Path
@@ -131,6 +132,7 @@ class SmokeMetrics(TypedDict):
     first_titles: list[str]
     empty_sections: int
     term_chunks: int
+    anchor_match_rate: float  # frac of sections whose id/title sits on its page_start
 
 
 class Iteration(TypedDict):
@@ -304,7 +306,8 @@ def _format_history_for_llm(history: list[Iteration]) -> str:
         m = it.get("smoke_metrics")
         m_str = "n/a" if m is None else (
             f"sections={m['section_count']} defs={m['has_definitions']} "
-            f"avg_tokens={m['avg_tokens']} largest_pct={m['largest_section_pct']:.0%}"
+            f"avg_tokens={m['avg_tokens']} largest_pct={m['largest_section_pct']:.0%} "
+            f"anchor_match={m['anchor_match_rate']:.0%}"
         )
         ve = it.get("validation_error")
         parts.append(
@@ -394,7 +397,7 @@ def smoke_test_node(state: ConfigureState) -> dict[str, Any]:
         doc = fitz.open(state["pdf_path"])
         total_pages = len(doc)
         try:
-            metrics = _compute_smoke_metrics(sections, total_pages)
+            metrics = _compute_smoke_metrics(sections, total_pages, doc)
             probes = _collect_probe_samples(doc, sections)
         finally:
             doc.close()
@@ -420,9 +423,10 @@ def smoke_test_node(state: ConfigureState) -> dict[str, Any]:
         for s in sections
     ]
     log.info(
-        "smoke_test: sections=%d defs=%s avg_tokens=%d largest_pct=%.0f%%",
+        "smoke_test: sections=%d defs=%s avg_tokens=%d largest_pct=%.0f%% anchor=%.0f%%",
         metrics["section_count"], metrics["has_definitions"],
         metrics["avg_tokens"], metrics["largest_section_pct"] * 100,
+        metrics["anchor_match_rate"] * 100,
     )
     return {
         "smoke_metrics": metrics,
@@ -431,8 +435,41 @@ def smoke_test_node(state: ConfigureState) -> dict[str, Any]:
     }
 
 
+def _section_anchor_match_rate(
+    doc: fitz.Document, sections: list[Section]
+) -> float:
+    """Fraction of (non-empty) sections whose own section_id or title text
+    actually appears on the PDF page the parser assigned as page_start
+    (checked over page_start ± 1 to tolerate boundary pages).
+
+    This is the decisive guard against a bad page offset: when section
+    page ranges are shifted onto the wrong part of the document (the
+    cpi.pdf +307 bug), almost no section's header lands on its claimed
+    start page, so this rate collapses toward 0. A correct parse scores
+    high (most section titles appear verbatim as their body header)."""
+    non_empty = [s for s in sections if s["text"].strip()]
+    if not non_empty:
+        return 0.0
+    matched = 0
+    for s in non_empty:
+        ps = s["page_start"] - 1  # to 0-based
+        texts = [
+            doc[i].get_text("text")
+            for i in (ps - 1, ps, ps + 1)
+            if 0 <= i < len(doc)
+        ]
+        page_text = "\n".join(texts)
+        sid = (s["section_id"] or "").strip()
+        title = (s["section_title"] or "").strip()
+        if sid and re.search(r"(?:Section\s+)?" + re.escape(sid) + r"\b", page_text):
+            matched += 1
+        elif len(title) >= 6 and title[:40] in page_text:
+            matched += 1
+    return matched / len(non_empty)
+
+
 def _compute_smoke_metrics(
-    sections: list[Section], total_pages: int
+    sections: list[Section], total_pages: int, doc: fitz.Document
 ) -> SmokeMetrics:
     non_empty = [s for s in sections if s["text"].strip()]
     if not non_empty:
@@ -450,6 +487,7 @@ def _compute_smoke_metrics(
             "first_titles": [],
             "empty_sections": len(sections),
             "term_chunks": 0,
+            "anchor_match_rate": 0.0,
         }
     tokens = [count_tokens(s["text"]) for s in non_empty]
     pages = [s["page_end"] - s["page_start"] + 1 for s in non_empty]
@@ -484,6 +522,7 @@ def _compute_smoke_metrics(
         "first_titles": [s["section_title"] for s in non_empty[:10]],
         "empty_sections": len(sections) - len(non_empty),
         "term_chunks": 0,  # filled in by chunker stage if/when we add it
+        "anchor_match_rate": _section_anchor_match_rate(doc, sections),
     }
 
 
@@ -520,6 +559,7 @@ _RULE_THRESHOLDS = {
     "max_largest_pct": 0.50,
     "min_avg_tokens": 200,
     "max_avg_tokens": 50_000,
+    "min_anchor_match": 0.50,
 }
 
 
@@ -530,6 +570,17 @@ def _rule_critique(m: SmokeMetrics) -> str | None:
             f"Only {m['section_count']} sections parsed (need at least "
             f"{_RULE_THRESHOLDS['min_sections']}). Likely the section header "
             f"pattern is wrong or body_start_markers is misplaced."
+        )
+    if m["anchor_match_rate"] < _RULE_THRESHOLDS["min_anchor_match"]:
+        return (
+            f"Only {m['anchor_match_rate']:.0%} of sections have their own "
+            f"id/title on their assigned start page (need at least "
+            f"{_RULE_THRESHOLDS['min_anchor_match']:.0%}). The page-number "
+            f"offset is almost certainly wrong — section page ranges are "
+            f"mapped onto the wrong part of the document (common when the PDF "
+            f"concatenates several documents that each restart page numbering, "
+            f"or when printed_page_pattern / search_first_n_lines miss the "
+            f"page number). Verify page_numbering settings."
         )
     if not m["has_definitions"]:
         return (
@@ -659,6 +710,7 @@ def _print_review_table(state: ConfigureState) -> None:
         f"({m['largest_section_pct']:.0%})"
     )
     print(f"  Empty sections:         {m['empty_sections']}")
+    print(f"  Anchor match rate:      {m['anchor_match_rate']:.0%}")
     print(f"\nAll {len(summaries)} parsed sections:")
     print(f"  {'section_id':>12s}  {'pages':>10s}  {'tokens':>7s}  title")
     print(f"  {'-'*12}  {'-'*10}  {'-'*7}  {'-'*55}")

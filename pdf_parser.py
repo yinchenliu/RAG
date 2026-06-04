@@ -130,23 +130,79 @@ def _match_toc_entry(
     return None
 
 
+_MIN_OFFSET_RUN = 3
+
+
 def _detect_page_offset(
     doc: fitz.Document, first_printed: int, config: ParsedConfig
 ) -> int:
-    """Find the PyMuPDF page index that displays the printed page number
-    `first_printed`. Returns offset such that pdf_index = printed_num + offset.
+    """Find the offset such that pdf_index = printed_num + offset.
+
+    Strategy: read each page's standalone printed number (from its first /
+    last few lines), then find the longest run of pages whose numbers
+    advance in lockstep with the PDF index — i.e. a constant
+    `pdf_index - printed` offset. That run is the document's main body
+    numbering sequence, and its offset is what we want.
+
+    This is robust to two things the old "find the page that shows
+    `first_printed`" approach got wrong:
+      * the first body page often suppresses its own page number, so
+        `first_printed` is never actually printed anywhere, and
+      * composite PDFs (a credit agreement followed by exhibits) restart
+        numbering at 1 several times, so a lone "1" can belong to an
+        exhibit hundreds of pages in — which is exactly what shifted every
+        cpi.pdf section by +307.
+    `first_printed` is kept only as a single-page fallback anchor.
     """
     pn = config.page_numbering
+
+    # 1. Detect at most one standalone printed number per page (edges only).
+    detected: list[tuple[int, int]] = []  # (pdf_idx, printed_num)
     for pdf_idx in range(len(doc)):
-        text = doc[pdf_idx].get_text("text")
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        candidates = (
-            lines[: pn.search_first_n_lines] + lines[-pn.search_last_n_lines :]
-        )
-        for c in candidates:
+        lines = [
+            l.strip() for l in doc[pdf_idx].get_text("text").split("\n") if l.strip()
+        ]
+        for c in lines[: pn.search_first_n_lines] + lines[-pn.search_last_n_lines :]:
             m = pn.printed_page_re.match(c)
-            if m and m.group(1).isdigit() and int(m.group(1)) == first_printed:
-                return pdf_idx - first_printed
+            if m and m.group(1).isdigit():
+                detected.append((pdf_idx, int(m.group(1))))
+                break
+
+    # 2. Group consecutive detections sharing a constant offset into runs.
+    #    A page with no detectable number simply drops out of `detected`
+    #    without breaking the run, since the surviving neighbours still
+    #    share the same offset. Prefer the longest run; break ties toward
+    #    the earliest (the body sequence precedes any trailing exhibits).
+    best_offset: int | None = None
+    best_len = 0
+    best_start = len(doc)
+    run_offset: int | None = None
+    run_len = 0
+    run_start = 0
+    for pdf_idx, printed in detected:
+        offset = pdf_idx - printed
+        if offset == run_offset:
+            run_len += 1
+        else:
+            run_offset, run_len, run_start = offset, 1, pdf_idx
+        if run_len > best_len or (run_len == best_len and run_start < best_start):
+            best_offset, best_len, best_start = run_offset, run_len, run_start
+
+    if best_offset is not None and best_len >= _MIN_OFFSET_RUN:
+        log.info(
+            "page offset = %d (consistent run of %d numbered pages from PDF page %d)",
+            best_offset, best_len, best_start + 1,
+        )
+        return best_offset
+
+    # 3. Fallback: the old single-page anchor on `first_printed`.
+    for pdf_idx, printed in detected:
+        if printed == first_printed:
+            log.info(
+                "page offset = %d (fallback: first page showing printed %d)",
+                pdf_idx - first_printed, first_printed,
+            )
+            return pdf_idx - first_printed
     log.warning(
         "Could not detect page-number offset; defaulting to 0 (section page ranges may be shifted)"
     )

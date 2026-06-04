@@ -14,6 +14,7 @@ from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
+from langgraph.errors import GraphRecursionError
 from dotenv import load_dotenv
 
 from RAG.rag import CLOIndentureRAG
@@ -32,7 +33,12 @@ class State(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
-rag = CLOIndentureRAG()
+# Resolve the DB path from this file's location, not the process working
+# directory: running RAG_graph.py from the IDE sets cwd to the RAG/ folder, so
+# the default relative "RAG/chroma_db" would resolve to RAG/RAG/chroma_db (an
+# empty DB) and every search would report "no indentures ingested".
+_HERE = Path(__file__).resolve().parent  # .../RAG
+rag = CLOIndentureRAG(persist_dir=str(_HERE / "chroma_db"))
 
 
 @tool
@@ -131,7 +137,14 @@ def search_clo_indenture(doc_id: str, query: str) -> str:
 
 
 tools = [list_indentures, search_clo_indenture]
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite").bind_tools(tools)
+# gemini-3.5-flash (not flash-lite): the lite tier is too weak to reliably
+# (a) emit multiple parallel tool calls in one turn and (b) keep iterating in
+# the agentic loop instead of wrapping up early. temperature is kept low so
+# the model follows the "one topic per call" / "don't defer to the user"
+# instructions consistently rather than wandering.
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.5-flash", temperature=0.1
+).bind_tools(tools)
 
 
 def llm_node(state: State) -> State:
@@ -148,11 +161,14 @@ def llm_node(state: State) -> State:
         "calling `search_clo_indenture`. On the very first user turn of "
         "a session (or any time the deal is unclear), call "
         "`list_indentures` to see what is available, then match it to "
-        "the user's stated deal name. If there is no obvious match, ask "
-        "the user which deal they mean — do NOT guess a `doc_id`. Once "
-        "the deal is established, REUSE the same `doc_id` for every "
-        "subsequent `search_clo_indenture` call in the conversation "
-        "without re-listing. "
+        "the user's stated deal name. Call `list_indentures` at most "
+        "ONCE for this — never call it twice in a row. If, after one "
+        "listing, the user's message does not clearly identify one of "
+        "the listed `doc_id`s, STOP and ask the user to pick one from "
+        "the list; do NOT guess a `doc_id`, and do NOT re-list in a "
+        "loop. Once the deal is established, REUSE the same `doc_id` "
+        "for every subsequent `search_clo_indenture` call in the "
+        "conversation without re-listing. "
         ""
         "Decide for each user turn whether you need to call "
         "`search_clo_indenture`: call it when the user asks about a "
@@ -165,15 +181,52 @@ def llm_node(state: State) -> State:
         "messages (e.g. resolve pronouns and implicit references). "
         ""
         "ONE TOPIC PER TOOL CALL. If the user asks about multiple "
-        "unrelated topics in one turn (e.g. 'what's the closing date AND "
-        "who is the trustee?'), emit one `search_clo_indenture` call per "
-        "topic in the same turn — they will run in parallel. Never "
+        "unrelated topics in one turn, emit one `search_clo_indenture` "
+        "call per topic IN THE SAME TURN — they run in parallel. Never "
         "combine unrelated topics into a single query, because mixing "
         "topics dilutes the embedding vector and causes the retriever "
         "to return chunks that are mediocre matches for both rather "
         "than strong matches for either. Only combine terms in one "
         "query when they are part of the same concept (e.g. 'CCC/Caa "
-        "excess adjustment calculation'). "
+        "excess adjustment calculation'). Before searching, silently "
+        "decompose the user's turn into its distinct sub-questions, then "
+        "fire one focused call for each. WORKED EXAMPLE — the request "
+        "'for the initial term loans, get the coupon rate (benchmark + "
+        "spread), maturity date, and any payment schedule' is THREE "
+        "distinct topics and must become THREE parallel calls: "
+        "(1) 'Applicable Rate / Applicable Margin spread over SOFR for "
+        "Initial Term Loans'; (2) 'Initial Term Loan Maturity Date "
+        "definition'; (3) 'Initial Term Loan amortization repayment "
+        "schedule'. Do not collapse them into one query. "
+        ""
+        "KEEP GOING UNTIL THE QUESTION IS ANSWERED — you are an "
+        "autonomous agent, not a one-shot lookup. After each batch of "
+        "tool results, judge whether you now have the CONCRETE values "
+        "the user asked for. If a result only gives you a pointer "
+        "instead of the value — e.g. a defined term whose body is "
+        "'has the meaning specified in Section 2.01(a)', or a rate that "
+        "is expressed as 'Applicable Rate' / 'Applicable Margin' — that "
+        "is NOT an answer; immediately issue a FOLLOW-UP "
+        "`search_clo_indenture` call that chases the cross-reference "
+        "(search the referenced section, or the 'Applicable Rate' / "
+        "'Applicable Margin' definition and any pricing grid) to "
+        "retrieve the actual number or date. Loop like this — search, "
+        "read, search again — for as many rounds as it takes. "
+        ""
+        "NEVER defer RETRIEVAL work back to the user once the deal is "
+        "known. Do NOT end your turn with offers like 'let me know if "
+        "you want me to search for X' or 'I would need to look up Y' — "
+        "if you can see the next search to run, just run it. Stop and "
+        "produce a final answer (plain text, no tool call) ONLY when: "
+        "(a) you have the concrete values the user asked for; (b) you "
+        "have genuinely exhausted reasonable reformulations and the "
+        "document does not contain them — state plainly what is and "
+        "isn't in the document, citing what you did find; or (c) you "
+        "cannot tell which deal/`doc_id` to search even after listing "
+        "once — in that case ask the user to pick from the available "
+        "`doc_id`s. That deal-selection question is the ONLY acceptable "
+        "hand-back to the user; never loop on `list_indentures` instead "
+        "of simply asking it. "
         ""
         "Cite the section_id from the retrieved chunks in your final "
         "answer whenever possible."
@@ -202,6 +255,12 @@ graph.add_conditional_edges(
 graph.add_edge("tools", "llm")
 
 app = graph.compile()
+
+# Safeguard for the now-more-persistent agentic loop. Each round trip
+# (llm step + tools step) consumes 2 toward this limit, so 16 allows ~8
+# search→read→search iterations before LangGraph raises GraphRecursionError.
+# Enough for chasing cross-references; low enough to stop a runaway loop.
+RECURSION_LIMIT = 16
 
 
 _WIDTH = 80
@@ -281,8 +340,18 @@ if __name__ == "__main__":
         if not user_input:
             continue
         messages.append(HumanMessage(content=user_input))
-        for update in app.stream({"messages": messages}, stream_mode="updates"):
-            for _node, payload in update.items():
-                for m in payload.get("messages", []):
-                    messages.append(m)
-                    _print_new_message(m)
+        try:
+            for update in app.stream(
+                {"messages": messages},
+                stream_mode="updates",
+                config={"recursion_limit": RECURSION_LIMIT},
+            ):
+                for _node, payload in update.items():
+                    for m in payload.get("messages", []):
+                        messages.append(m)
+                        _print_new_message(m)
+        except GraphRecursionError:
+            print(
+                f"\n[stopped after {RECURSION_LIMIT} steps — the agent kept "
+                "searching without converging. Try a more specific question.]"
+            )

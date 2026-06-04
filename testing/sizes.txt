@@ -1,0 +1,5 @@
+Total chunks: 238
+Max chunk (tiktoken): 1062 tokens
+Chunks > 512 tiktoken: 64
+Chunks > 1000 tiktoken: 2
+Top 5 sizes: [1062, 1016, 987, 986, 985]
